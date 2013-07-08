@@ -111,18 +111,26 @@ class TableEntry (object):
     self.packet_count += 1
     self.last_touched = now
 
+  def is_idle_timed_out (self, now=None):
+    if now is None: now = time.time()
+    if self.idle_timeout > 0:
+      if (now - self.last_touched) > self.idle_timeout:
+        return True
+    return False
+
+  def is_hard_timed_out (self, now=None):
+    if now is None: now = time.time()
+    if self.hard_timeout > 0:
+      if (now - self.created) > self.hard_timeout:
+        return True
+    return False
+
   def is_expired (self, now=None):
     """
     Tests whether this flow entry is expired due to its idle or hard timeout
     """
     if now is None: now = time.time()
-    if self.hard_timeout > 0:
-      if (now - self.created) > self.hard_timeout:
-        return True
-    if self.idle_timeout > 0:
-      if (now - self.last_touched) > self.idle_timeout:
-        return True
-    return False
+    return self.is_idle_timed_out(now) or self.is_hard_timed_out(now)
 
   def __str__ (self):
     return type(self).__name__ + "\n  " + self.show()
@@ -155,12 +163,34 @@ class TableEntry (object):
                           byte_count=self.byte_count,
                           actions=self.actions)
 
+  def to_flow_removed (self, now=None, reason=None):
+    #TODO: Rename flow_stats to to_flow_stats and refactor?
+    if now is None: now = time.time()
+    dur_nsec,duration_sec = math.modf(now - self.created)
+    fr = ofp_flow_removed()
+    fr.match = self.match
+    fr.cookie = self.cookie
+    fr.priority = self.priority
+    fr.reason = reason
+    fr.duration_sec = int(duration_sec)
+    fr.duration_nsec = int(dur_nsec * 1e9)
+    fr.idle_timeout = self.idle_timeout
+    fr.hard_timeout = self.hard_timeout
+    fr.packet_count = self.packet_count
+    fr.byte_count = self.byte_count
+    return fr
+
 
 class FlowTableModification (Event):
-  def __init__ (self, added=[], removed=[]):
+  def __init__ (self, added=[], removed=[], reason=None):
     Event.__init__(self)
     self.added = added
     self.removed = removed
+
+    # Reason for modification.
+    # Presently, this is only used for removals and is either one of OFPRR_x,
+    # or None if it does not correlate to any of the items in the spec.
+    self.reason = reason
 
 
 class FlowTable (EventMixin):
@@ -177,6 +207,12 @@ class FlowTable (EventMixin):
 
     # Table is a list of TableEntry sorted by descending effective_priority.
     self._table = []
+
+  def _dirty (self):
+    """
+    Call when table changes
+    """
+    pass
 
   @property
   def entries (self):
@@ -206,12 +242,15 @@ class FlowTable (EventMixin):
         low = middle + 1
     table.insert(low, entry)
 
+    self._dirty()
+
     self.raiseEvent(FlowTableModification(added=[entry]))
 
-  def remove_entry (self, entry):
+  def remove_entry (self, entry, reason=None):
     assert isinstance(entry, TableEntry)
     self._table.remove(entry)
-    self.raiseEvent(FlowTableModification(removed=[entry]))
+    self._dirty()
+    self.raiseEvent(FlowTableModification(removed=[entry], reason=reason))
 
   def matching_entries (self, match, priority=0, strict=False, out_port=None):
     entry_match = lambda e: e.is_matched_by(match, priority, strict, out_port)
@@ -219,35 +258,43 @@ class FlowTable (EventMixin):
 
   def flow_stats (self, match, out_port=None, now=None):
     mc_es = self.matching_entries(match=match, strict=False, out_port=out_port)
-    return ( e.flow_stats(now) for e in mc_es )
+    return [ e.flow_stats(now) for e in mc_es ]
 
-  def expired_entries (self, now=None):
-    return [ entry for entry in self._table if entry.is_expired(now) ]
-
-  def _remove_specific_entries (self, remove_flows):
-    #for entry in remove_flows:
+  def _remove_specific_entries (self, flows, reason=None):
+    #for entry in flows:
     #  self._table.remove(entry)
-    #self._table = [entry for entry in self._table if entry not in remove_flows]
-    #self.raiseEvent(FlowTableModification(removed=remove_flows))
-    remove_flows = set(remove_flows)
+    #self._table = [entry for entry in self._table if entry not in flows]
+    if not flows: return
+    self._dirty()
+    remove_flows = set(flows)
     i = 0
     while i < len(self._table):
       entry = self._table[i]
       if entry in remove_flows:
         del self._table[i]
         remove_flows.remove(entry)
+        if not remove_flows: break
       else:
         i += 1
     assert len(remove_flows) == 0
+    self.raiseEvent(FlowTableModification(removed=flows, reason=reason))
 
   def remove_expired_entries (self, now=None):
-    remove_flows = self.expired_entries(now)
-    self._remove_specific_entries(remove_flows)
-    return remove_flows
+    idle = []
+    hard = []
+    now = time.time()
+    for entry in self._table:
+      if entry.is_idle_timed_out(now):
+        idle.append(entry)
+      elif entry.is_hard_timed_out(now):
+        hard.append(entry)
+    self._remove_specific_entries(idle, OFPRR_IDLE_TIMEOUT)
+    self._remove_specific_entries(hard, OFPRR_HARD_TIMEOUT)
 
-  def remove_matching_entries (self, match, priority=0, strict=False):
+  def remove_matching_entries (self, match, priority=0, strict=False,
+      reason=None):
     remove_flows = self.matching_entries(match, priority, strict)
-    self._remove_specific_entries(remove_flows)
+    self._remove_specific_entries(remove_flows, reason=reason)
     return remove_flows
 
   def entry_for_packet (self, packet, in_port):
@@ -308,6 +355,7 @@ class SwitchFlowTable (FlowTable):
         return ("modified", modified)
     elif command == OFPFC_DELETE or command == OFPFC_DELETE_STRICT:
       is_strict = (command == OFPFC_DELETE_STRICT)
-      return ("removed", self.remove_matching_entries(match, priority=priority, strict=is_strict))
+      return ("removed", self.remove_matching_entries(match,
+          priority=priority, strict=is_strict, reason=OFPRR_DELETE))
     else:
       raise AttributeError("Command not yet implemented: %s" % command)

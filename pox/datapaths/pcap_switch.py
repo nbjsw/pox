@@ -28,6 +28,7 @@ from threading import Thread
 import pox.openflow.libopenflow_01 as of
 from pox.lib.packet import ethernet
 import logging
+from pox.lib.recoco import Timer
 
 log = core.getLogger()
 
@@ -71,12 +72,18 @@ def launch (address = '127.0.0.1', port = 6633, max_retry_delay = 16,
       phy.supported = of.OFPPF_10MB_HD
       phy.peer = of.OFPPF_10MB_HD
       phys.append(phy)
-
-    do_launch(PCapSwitch, address, port, max_retry_delay, dpid, ports=phys,
-              extra_args=extra)
-
+    
+     
+    pcap_switch = do_launch(PCapSwitch, address, port, max_retry_delay, dpid, ports=phys,
+                            extra_args=extra)
+    print("invoke a Timer")
+    Timer(timeToWake=1, callback=pcap_switch.table.remove_expired_entries, 
+          absoluteTime = False, recurring = True, args = (), kw = {},
+          scheduler = None,started = True, selfStoppable = True)
   core.addListenerByName("UpEvent", up)
 
+def helloworld():
+  print("hello!!!!!")
 
 class PCapSwitch (SoftwareSwitchBase):
   # Default level for loggers of this class
