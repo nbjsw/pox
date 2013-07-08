@@ -151,7 +151,7 @@ class TableEntry (object):
 
   def flow_stats (self, now=None):
     if now is None: now = time.time()
-    dur_nsec,duration_sec = math.modf(now - self.created)
+    dur_nsec,dur_sec = math.modf(now - self.created)
     return ofp_flow_stats(match=self.match,
                           duration_sec=int(dur_sec),
                           duration_nsec=int(dur_nsec * 1e9),
@@ -166,13 +166,13 @@ class TableEntry (object):
   def to_flow_removed (self, now=None, reason=None):
     #TODO: Rename flow_stats to to_flow_stats and refactor?
     if now is None: now = time.time()
-    dur_nsec,duration_sec = math.modf(now - self.created)
+    dur_nsec,dur_sec = math.modf(now - self.created)
     fr = ofp_flow_removed()
     fr.match = self.match
     fr.cookie = self.cookie
     fr.priority = self.priority
     fr.reason = reason
-    fr.duration_sec = int(duration_sec)
+    fr.duration_sec = int(dur_sec)
     fr.duration_nsec = int(dur_nsec * 1e9)
     fr.idle_timeout = self.idle_timeout
     fr.hard_timeout = self.hard_timeout
